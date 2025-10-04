@@ -9,6 +9,8 @@ import threading
 from elevenlabs.client import ElevenLabs
 from elevenlabs.play import play
 
+from stt import listen_once
+
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -38,10 +40,64 @@ class MyAgentHooks(AgentHooks):
     async def on_end(self, context: RunContextWrapper, agent, output):
         print(f"---- {agent.name} completed the task! ----")
 
-general_agent = Agent(
+        """
+        This runs when an agent finishes. It:
+          - extracts text from output
+          - synthesizes TTS using agent.voice_id
+          - plays audio and prints text word-by-word synced to audio duration
+        """
+        # extract text safely from `output`
+        if isinstance(output, str):
+            text = output
+        elif hasattr(output, "get") and isinstance(output, dict):
+            # common pattern: {"text": "..."}
+            text = output.get("text") or output.get("output") or str(output)
+        else:
+            try:
+                text = str(output)
+            except Exception:
+                return
+
+        text = text.strip()
+        if not text:
+            return
+
+        # choose voice; fallback to triage/general voice if missing
+        voice_id = getattr(agent, "voice_id", None) or "FGY2WhTYpPnrIDTdsKH5"
+
+        # Synthesize in a thread (non-blocking for the event loop)
+        def synth():
+            return elevenlabs.text_to_speech.convert(
+                text=text,
+                voice_id=voice_id,
+                model_id="eleven_multilingual_v2",
+                output_format="mp3_44100_128"
+            )
+
+        # Use a lock so only one agent speaks at a time
+        async with speech_lock:
+            audio = await asyncio.to_thread(synth)
+
+            # compute audio duration if available, else estimate (0.18s per word)
+            words = text.split()
+            duration = getattr(audio, "duration", None)
+            if duration is None:
+                duration = max(1.0, 0.18 * max(1, len(words)))
+
+            # start playback in background thread (so we can print while it plays)
+            threading.Thread(target=play, args=(audio,), daemon=True).start()
+
+            # print words synced to duration (approx)
+            delay = duration / max(1, len(words))
+            for w in words:
+                print(w + " ", end="", flush=True)
+                await asyncio.sleep(delay)
+            print()  # newline after done
+
+general_agent: Agent = Agent(
     name="General Agent",
     instructions="""
-    You are a general-purpose agent.
+    You are a general-purpose agent. Talk like you're a general purpose assistant.
     Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
     """,
     model=llm_model,
@@ -51,7 +107,7 @@ general_agent = Agent(
 rescue_agent: Agent = Agent(
     name="Rescue Agent",
     instructions="""
-    You are a helpful rescue agent.
+    You are a helpful rescue agent. Talk like you're a rescue agent.
     Your job is use your tools according to the user's request. Make sure you fully understand the user's request before choosing a tool to use.
     Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
     You help people in emergency situations like:
@@ -90,7 +146,7 @@ fire_brigade_agent: Agent = Agent(
     hooks=MyAgentHooks()
 )
 
-triage_agent = Agent(
+triage_agent: Agent = Agent(
     name="Triage Agent",
     instructions="""
     You are a triage agent. 
@@ -115,44 +171,39 @@ fire_brigade_agent.voice_id = "SOYHLrjzK2X1ezoPC6cr" # Harry
 
 async def main():
 
-    audio = elevenlabs.text_to_speech.convert(
-            text="Frontline Emergency Services. Whats the emergency?",
-            voice_id="FGY2WhTYpPnrIDTdsKH5",
-            model_id="eleven_multilingual_v2",
-            output_format="mp3_44100_128"
-        )
-    play(audio)
+    greeting_audio = await asyncio.to_thread(
+        elevenlabs.text_to_speech.convert,
+        text="Frontline Emergency Services. What's the emergency?",
+        voice_id=general_agent.voice_id,
+        model_id="eleven_multilingual_v2",
+        output_format="mp3_44100_128"
+    )
+    threading.Thread(target=play, args=(greeting_audio,), daemon=True).start()
 
     while True:
-        query = input("\nWhat's the emergency? ")
-        # Get the full response from the AI
-        result = await Runner.run(starting_agent=triage_agent, input=query, session=session)
-        response_text = result.final_output
+        choice = input("Voice or chat? (v/c): ").strip().lower()
+        if choice == 'c':
+            query = input("What's the emergency?")
+        elif choice == 'v':
+            query = listen_once()
+            if query:
+                print(f"User: {query}")
+            if query.lower() in ["exit", "quit"]:
+                break
+        else:
+            print("Invalid choice. Please enter 'v' for voice or 'c' for chat.")
+            continue
 
-        # Generate audio for the full response
-        audio = elevenlabs.text_to_speech.convert(
-            text=response_text,
-            voice_id="FGY2WhTYpPnrIDTdsKH5",
-            model_id="eleven_multilingual_v2",
-            output_format="mp3_44100_128"
+        # Run conversation starting with triage agent.
+        # The hooks will take care of voice playback + printing
+        result = await Runner.run(
+            starting_agent=triage_agent,
+            input=query,
+            session=session
         )
 
-        # Play audio in a background thread
-        import threading
-        threading.Thread(target=play, args=(audio,), daemon=True).start()
-
-        # Display text word-by-word in sync with audio duration
-        words = response_text.split()
-        # Estimate duration per word (total audio duration / number of words)
-        duration = audio.duration if hasattr(audio, "duration") else 10  # fallback to 10s
-        delay = duration / len(words)
-
-        for word in words:
-            print(word + " ", end="", flush=True)
-            time.sleep(delay)
-        
-        if query.lower() in ["exit", "quit"]:
-            break
+        # Print final text in plain form (voice + word sync already handled by hooks)
+        print(f"\n[Final Output]: {result.final_output}")
 
 asyncio.run(main())
 
