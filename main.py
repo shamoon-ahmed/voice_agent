@@ -11,6 +11,9 @@ from elevenlabs.play import play
 
 from stt import listen_once
 
+from frontline_agents.frontline_agents import general_agent, rescue_agent, healthcare_agent, fire_brigade_agent
+from frontline_agents.lifecycle import MyAgentHooks
+
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -30,121 +33,10 @@ llm_model = OpenAIChatCompletionsModel(
 
 session = SQLiteSession('conversation123')
 
-class MyAgentHooks(AgentHooks):
-    async def on_start(self, context: RunContextWrapper, agent):
-        print(f"---- {agent.name} in action! ---- ")
-
-    async def on_handoff(self, context: RunContextWrapper, agent: Agent, source: Agent) -> None:
-        print(f"---- {source.name} handed off to {agent.name} ----")
-
-    async def on_end(self, context: RunContextWrapper, agent, output):
-        print(f"---- {agent.name} completed the task! ----")
-
-        """
-        This runs when an agent finishes. It:
-          - extracts text from output
-          - synthesizes TTS using agent.voice_id
-          - plays audio and prints text word-by-word synced to audio duration
-        """
-        # extract text safely from `output`
-        if isinstance(output, str):
-            text = output
-        elif hasattr(output, "get") and isinstance(output, dict):
-            # common pattern: {"text": "..."}
-            text = output.get("text") or output.get("output") or str(output)
-        else:
-            try:
-                text = str(output)
-            except Exception:
-                return
-
-        text = text.strip()
-        if not text:
-            return
-
-        # choose voice; fallback to triage/general voice if missing
-        voice_id = getattr(agent, "voice_id", None) or "FGY2WhTYpPnrIDTdsKH5"
-
-        # Synthesize in a thread (non-blocking for the event loop)
-        def synth():
-            return elevenlabs.text_to_speech.convert(
-                text=text,
-                voice_id=voice_id,
-                model_id="eleven_multilingual_v2",
-                output_format="mp3_44100_128"
-            )
-
-        # Use a lock so only one agent speaks at a time
-        async with speech_lock:
-            audio = await asyncio.to_thread(synth)
-
-            # compute audio duration if available, else estimate (0.18s per word)
-            words = text.split()
-            duration = getattr(audio, "duration", None)
-            if duration is None:
-                duration = max(1.0, 0.18 * max(1, len(words)))
-
-            # start playback in background thread (so we can print while it plays)
-            threading.Thread(target=play, args=(audio,), daemon=True).start()
-
-            # print words synced to duration (approx)
-            delay = duration / max(1, len(words))
-            for w in words:
-                print(w + " ", end="", flush=True)
-                await asyncio.sleep(delay)
-            print()  # newline after done
-
-general_agent: Agent = Agent(
-    name="General Agent",
-    instructions="""
-    You are a general-purpose agent. Talk like you're a general purpose assistant.
-    Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
-    """,
-    model=llm_model,
-    hooks=MyAgentHooks()
-)
-
-rescue_agent: Agent = Agent(
-    name="Rescue Agent",
-    instructions="""
-    You are a helpful rescue agent. Talk like you're a rescue agent.
-    Your job is use your tools according to the user's request. Make sure you fully understand the user's request before choosing a tool to use.
-    Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
-    You help people in emergency situations like:
-        - Floods
-        - Earthquakes
-        - Accidents
-        - Other natural disasters
-    When you get a query, understand it fully. Make sure the query is about taking help from a rescue department then call the rescue_report tool.
-    """,
-    model=llm_model,
-    hooks=MyAgentHooks()
-)
-
-healthcare_agent: Agent = Agent(
-    name="Healthcare Assistant",
-    instructions="""You are a healthcare assistant with access to a tool that can book an ambulance. Your main job is to quickly and accurately book an ambulance for users who report medical emergencies. 
-
-    Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
-
-    - Ask for essential details such as location, nature of emergency, and contact information.
-    - Use the call_ambulance tool to book an ambulance when needed.
-    - Respond with empathy and professionalism.
-    - Do not provide medical advice or diagnosis.""",
-    model=llm_model,
-    hooks=MyAgentHooks()
-)
-
-fire_brigade_agent: Agent = Agent(
-    name="Fire Brigade Agent",
-    instructions="""
-    You are a helpful fire brigade agent.
-    Do not give lengthy and long responses. Keep it precise and clear. Make sure your answer is straight forward 2 to 3 lines.
-    When you get a query related to fire breakout, you should use the report_fire_breakout tool to assist the user in reporting the fire to the fire department.
-    """,
-    model=llm_model,
-    hooks=MyAgentHooks()
-)
+general_agent.voice_id = "FGY2WhTYpPnrIDTdsKH5" # Laura
+rescue_agent.voice_id = "TX3LPaxmHKxFdv7VOQHJ" # Liam
+healthcare_agent.voice_id = "pFZP5JQG7iQjIQuC4Bku" # Lily
+fire_brigade_agent.voice_id = "SOYHLrjzK2X1ezoPC6cr" # Harry
 
 triage_agent: Agent = Agent(
     name="Triage Agent",
@@ -163,11 +55,6 @@ triage_agent: Agent = Agent(
     model=llm_model,
     hooks=MyAgentHooks()
 )
-
-general_agent.voice_id = "FGY2WhTYpPnrIDTdsKH5" # Laura
-rescue_agent.voice_id = "TX3LPaxmHKxFdv7VOQHJ" # Liam
-healthcare_agent.voice_id = "pFZP5JQG7iQjIQuC4Bku" # Lily
-fire_brigade_agent.voice_id = "SOYHLrjzK2X1ezoPC6cr" # Harry
 
 async def main():
 

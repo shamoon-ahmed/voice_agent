@@ -6,7 +6,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "elevenlabs>=2.16.0",
+    "fastapi>=0.118.0",
+    "livekit>=1.0.13",
+    "livekit-agents[google]~=1.2",
+    "livekit-plugins-openai>=1.2.14",
     "openai-agents>=0.3.3",
+    "pydub>=0.25.1",
     "sounddevice>=0.5.2",
     "vosk>=0.3.45",
 ]
